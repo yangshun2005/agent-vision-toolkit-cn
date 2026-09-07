@@ -1,0 +1,272 @@
+# Agent 安装说明
+
+开始前请先完整阅读 [README.md](README.md)，理解项目用途、工作原理和限制。本说明用于指导用户的 agent 根据用户机器上的真实配置部署**无缝接入层**（本地代理），并非固定路径的一键安装脚本。
+
+## 适用范围
+
+- **Codex**：本说明的完整路径（代理 + `config.toml` + model catalog）。
+- **Claude Code**：使用同一个代理，宿主侧仅需修改 `ANTHROPIC_BASE_URL`，详见[第 4 步的 Claude Code 小节](#claude-code)。
+- **Pi / Oh My Pi / OpenCode**：不经过代理，使用 [`extensions/`](extensions/) 下的单文件原生 extension，安装步骤见各自 README。
+- **仅安装视觉工具箱**（`glance`/`ground`/`detect`/`trace`/`crop` + skill）：无需代理，按 README 的 Quick Start 操作即可；本文末尾的「可选」各节是逐工具的部署细节。
+
+代理、宿主配置修改及验证流程与操作系统无关。平台差异仅存在于文件路径、后台常驻方式和可选的 CLI wrapper。
+
+## 目标与边界
+
+用户的纯文本模型（下文以 DeepSeek 为例）必须已能在宿主中正常对话。部署仅补充图片转文字代理，不重建用户现有的上游配置。
+
+- 保留现有模型、slug、`display_name`、provider、鉴权方式和 DeepSeek key。
+- 不新增模型，也不主动改写用户的模型配置。代理兼容既有的 `gpt-5.2` 显示别名，并在转发时将其映射为 `deepseek-v4-flash`。
+- 不要求 `DEEPSEEK_API_KEY`；Codex 原有的 `Authorization` 由代理原样转发。
+- `config.toml` 仅将当前 provider 的 `base_url` 指向 `http://127.0.0.1:19100`。
+- model catalog 仅在当前条目的 `input_modalities` 明确为 `["text"]` 时追加 `"image"`。
+- 修改配置前必须备份，并使用 TOML/JSON 解析器进行结构化编辑。
+- 不修改 `assets/` 下的效果图。
+
+## 前置条件
+
+- 已接入纯文本模型并能正常对话的宿主（Codex 或 Claude Code）
+- Python 3.11+
+- 一个支持 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 协议的视觉 API；通过 `VISION_API_PROTOCOL` 选择协议
+
+## 1. 定位并备份现有配置
+
+Codex 配置目录默认位于当前用户主目录下的 `.codex`。如果用户设置了 `CODEX_HOME`，则以该值为准。
+
+读取其中的 `config.toml`：
+
+1. 读取顶层 `model_provider` 和 `model`。
+2. 在对应的 `[model_providers.<name>]` 中读取当前 `base_url`，将其保存为代理的真实上游地址。
+3. 如果配置了 `model_catalog_json`，按该值定位 catalog；相对路径则基于 Codex 配置目录解析。
+4. 为将要修改的 `config.toml` 和 catalog 分别创建带时间戳的备份。
+
+如果当前 `base_url` 已经是 `http://127.0.0.1:19100`，则必须从既有部署信息或备份中确认真正的上游地址，不能将代理自身设为上游。
+
+## 2. 准备运行目录与视觉配置
+
+选择当前用户可写的稳定目录。推荐值：
+
+| 系统 | `INSTALL_DIR` | `ENV_FILE` |
+|---|---|---|
+| macOS / Linux | `~/.local/share/agent-vision-toolkit` | `~/.config/agent-vision-toolkit/env` |
+| Windows | `%LOCALAPPDATA%\agent-vision-toolkit` | `%LOCALAPPDATA%\agent-vision-toolkit\env` |
+
+将 `vision_proxy.py` 和 `vision_client.py` 复制到 `INSTALL_DIR`，再将 `.env.example` 复制为 `ENV_FILE`。仅需填写：
+
+```dotenv
+VISION_API_KEY=...
+VISION_BASE_URL=...
+VISION_MODEL=...
+LANG=zh  # 可选：视觉模型输出语言（zh/en），不填则保持默认中文
+# VISION_API_PROTOCOL=chat_completions  # 可选：chat_completions / responses / anthropic
+# VISION_REASONING_EFFORT=medium        # 可选：responses 协议下的推理强度
+# VISION_ANTHROPIC_THINKING=omit        # 可选：omit 兼容性最好；仅在模型明确支持时使用 disabled / adaptive
+# VISION_USER_AGENT=custom-vision-client/1.0  # 可选：覆盖默认的浏览器兼容 User-Agent
+```
+
+不要在 env 中写入上游模型的 key（如 `DEEPSEEK_API_KEY`）。上游鉴权仍由宿主发送。
+
+`VISION_ANTHROPIC_THINKING=omit` 不发送 thinking 字段，并保留模型默认行为。`disabled` 与 `adaptive` 存在模型兼容性限制；如果提供方返回 HTTP 400，请先恢复为 `omit`。当前不提供手动 `enabled` + `budget_tokens`。
+
+- macOS / Linux：执行 `chmod 600 <ENV_FILE>`。
+- Windows：将 env 保留在当前用户的 `%LOCALAPPDATA%` 下，不要复制到公共目录。
+
+## 3. 前台启动代理
+
+先解析当前 Python 的绝对路径。`--upstream` 必须使用第 1 步记录的原始 `base_url`。
+
+macOS / Linux：
+
+```bash
+python3 <INSTALL_DIR>/vision_proxy.py \
+  --port 19100 \
+  --upstream "原始 DeepSeek base_url" \
+  --env-file <ENV_FILE>
+```
+
+Windows PowerShell：
+
+```powershell
+py -3 "<INSTALL_DIR>\vision_proxy.py" --port 19100 --upstream "原始 DeepSeek base_url" --env-file "<ENV_FILE>"
+```
+
+尖括号是占位符，执行前必须替换为真实绝对路径。确认代理正在监听 `127.0.0.1:19100`。如果端口已被占用，先确认占用者是否为用户已有的相关代理，不得直接终止未知进程。
+
+## 4. 修改 Codex 配置
+
+### config.toml
+
+仅将当前 provider 的 `base_url` 改为：
+
+```toml
+base_url = "http://127.0.0.1:19100"
+```
+
+不要修改 provider 名、`model`、`wire_api`、`requires_openai_auth`、认证配置或其他设置。
+
+如果用户原有配置使用 `gpt-5.2` 作为显示别名，请继续保留该配置；代理会在请求转发时将其兼容映射为 `deepseek-v4-flash`。其他模型名仍原样透传。
+
+### model catalog
+
+找到与当前 `model` 对应的条目。仅当其明确配置为：
+
+```json
+"input_modalities": ["text"]
+```
+
+时，才追加 `image`：
+
+```json
+"input_modalities": ["text", "image"]
+```
+
+- 字段不存在：不修改。
+- 已包含 `image`：不修改。
+- 不修改 slug、模型名、`display_name` 或其他能力字段。
+
+### Claude Code
+
+当宿主是 Claude Code 时，跳过上面的 `config.toml` / catalog 两小节：第 1 步记录的是用户现有的 `ANTHROPIC_BASE_URL`（作为代理的 `--upstream`），第 4 步只需将环境里的 `ANTHROPIC_BASE_URL` 改为 `http://127.0.0.1:19100`。鉴权头由 Claude Code 照常发送、代理原样透传；注意覆盖 `ANTHROPIC_BASE_URL` 后 CLI 不再读取 keychain 凭据，若原有部署依赖 `ANTHROPIC_AUTH_TOKEN`，需保持其可见。
+
+## 5. 设置后台常驻
+
+这一步仅负责在用户登录后运行第 3 步已验证的命令。启动配置中只能保存脚本路径、参数和 env 文件路径，不能包含 API key。
+
+### macOS
+
+创建 `~/Library/LaunchAgents/com.agent-vision-toolkit.proxy.plist`，使用当前 Python、`INSTALL_DIR`、`ENV_FILE` 和原始上游地址的绝对路径，并设置 `RunAtLoad`、`KeepAlive` 和日志路径。加载：
+
+```bash
+launchctl bootout "gui/$(id -u)/com.agent-vision-toolkit.proxy" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.agent-vision-toolkit.proxy.plist
+launchctl kickstart -k "gui/$(id -u)/com.agent-vision-toolkit.proxy"
+```
+
+### Windows
+
+在当前用户的 Startup 目录创建一个 `.cmd` 启动项，内容仅调用已验证的代理命令。例如：
+
+```cmd
+@echo off
+start "Agent Vision Toolkit" /min py -3 "%LOCALAPPDATA%\agent-vision-toolkit\vision_proxy.py" --port 19100 --upstream "原始 DeepSeek base_url" --env-file "%LOCALAPPDATA%\agent-vision-toolkit\env" --log "%LOCALAPPDATA%\agent-vision-toolkit\proxy.log"
+```
+
+Startup 目录可通过 PowerShell 的 `[Environment]::GetFolderPath("Startup")` 获取。创建后运行一次该 `.cmd`，确认代理启动。不要把 key 写进 `.cmd`。
+
+### 其他系统
+
+使用系统已有的用户级进程管理器运行相同命令即可，例如 Linux 的 `systemd --user`。不要为此引入新的安装框架。
+
+无需迁移旧服务、事务式安装或复杂自动回滚。失败时保留备份并修正明确的问题。
+
+## 6. 验证
+
+使用当前系统的 Python 命令运行仓库内核心测试：
+
+```text
+python -m py_compile vision_proxy.py vision_client.py bin/glance bin/trace bin/crop ground.py detect.py
+python tests/test_image_rewrite_shapes.py
+python tests/smoke_test_proxy.py
+python tests/test_vision_client.py
+```
+
+检查端口：
+
+- macOS / Linux：`nc -z 127.0.0.1 19100`
+- Windows PowerShell：`Test-NetConnection 127.0.0.1 -Port 19100`
+
+完全重启宿主，然后要求当前模型对一张本地图片实际调用内置看图工具（Codex 的 `view_image`，Claude Code 的 `Read`），确认：
+
+1. 看图工具成功返回，而不是 modality 拒绝错误。
+2. 代理调用了视觉 API，并将图片描述交给当前模型。
+3. 当前模型能基于图片内容回答。
+4. 普通文本、原有模型名、鉴权和流式输出仍正常。
+
+完成后向用户报告：备份路径、实际修改的字段、服务状态和真实 `view_image` 验证结果。不得输出任何 API key。
+
+> **对 Agent 的要求**：作为 agent，如果用户没有明确表明需要额外的工具（`glance`、`ground`、`detect`、`trace`、`crop`），请在回答的最后询问用户是否安装这些额外工具，不要擅自安装。
+
+## 可选：glance
+
+`glance` 是独立附加功能，并非代理回退路径。需要时把 `bin/glance` 复制到 `INSTALL_DIR/bin`，它会复用同目录中的 `vision_client.py` 并自动读取同一份 `VISION_*` 配置。
+
+- macOS / Linux：创建 shell wrapper。
+- Windows：创建转发全部参数的 `.cmd` wrapper。
+
+wrapper 必须使用当前系统的绝对 Python 和脚本路径，并放入用户 PATH 中的可写目录（如 macOS / Linux 的 `~/.local/bin`，Windows 的 `%LOCALAPPDATA%\Microsoft\WindowsApps`；若目录不在 PATH，则将其加入用户级 PATH），不得覆盖用户已有的同名命令。完成后新开终端即可直接运行 `glance <图片> [选项]`，无需激活任何虚拟环境。
+
+## 可选：ground
+
+`ground` 使用自然语言定位图片中的对象或区域，并输出原图像素坐标下的边界框。它不是代理链路的一部分，复用同一份 `VISION_*` 配置，无需新的凭证。
+
+用户需要时：
+
+1. 将 `ground.py` 和 `bin/ground` 复制到 `INSTALL_DIR` 对应位置。
+2. 使用 `uv` 在 `INSTALL_DIR/.venv-ground` 创建隔离环境，仅安装额外依赖 `pillow`。
+3. 创建调用该环境 Python 和 `bin/ground` 的 shell 或 `.cmd` wrapper，放入用户 PATH 中的可写目录（同 glance，如 `~/.local/bin`；若不在 PATH，则将其加入用户级 PATH）；不得覆盖用户已有的同名命令。完成后新开终端即可直接运行 `ground <图片> "<目标描述>"`。
+4. 验证：`ground /path/to/image.png "目标描述"`。
+
+## 可选：detect
+
+`detect` 盘点图片（或指定区域）中的元素并输出编号清单和原图像素坐标。它与 `ground` 共用实现和 `.venv-ground` 环境。
+
+用户需要时：
+
+1. 将 `detect.py` 和 `bin/detect` 复制到 `INSTALL_DIR` 对应位置（依赖已随 ground 安装的 `ground.py` 与 `pillow`）。
+2. 按 ground 相同方式创建 wrapper 并放入 PATH；不得覆盖用户已有的同名命令。
+3. 验证：`detect /path/to/screenshot.png` 应输出编号元素清单。
+
+## 可选：trace
+
+`trace` 在本地将图片确定性地矢量化为 SVG（精确形状几何），完全不经过视觉 API，也不需要任何 key。
+
+用户需要时：
+
+1. 将 `bin/trace` 复制到 `INSTALL_DIR/bin`。
+2. 在 `INSTALL_DIR/.venv-ground`（若不存在则用 `uv` 创建）中追加安装依赖 `vtracer`（`--region` 功能还需 `pillow`）。
+3. 按 glance/ground 相同方式创建 wrapper 并放入 PATH；不得覆盖用户已有的同名命令。
+4. 验证：`trace /path/to/diagram.png --polygon` 应输出 SVG。
+
+## 可选：crop
+
+`crop` 在本地将图片中的像素盒（X1,Y1,X2,Y2，通常来自 `ground`/`detect` 的输出）裁剪成独立图片文件，完全不经过视觉 API，也不需要任何 key。
+
+用户需要时：
+
+1. 将 `bin/crop` 复制到 `INSTALL_DIR/bin`。
+2. 在 `INSTALL_DIR/.venv-ground`（若不存在则用 `uv` 创建）中确认已安装 `pillow`。
+3. 按 glance/ground 相同方式创建 wrapper 并放入 PATH；不得覆盖用户已有的同名命令。
+4. 验证：`crop /path/to/image.png --region 100,100,300,300` 应生成裁剪后的 PNG 并打印输出路径。
+
+## 可选兼容功能
+
+以下功能默认关闭，仅在确认上游确实需要时才启用：
+
+- `--codex-header-compat`：调整部分 Codex 身份请求头。
+- `--inject-reasoning-summary`：注入兼容的 reasoning summary；该模式可能缓冲对应响应。
+
+## 上游出口（Egress）
+
+代理默认**直连**（TCP + TLS）`--upstream` 指定的上游，不再读取 Windows 系统代理——本地代理（如 Clash）宕机不会拖垮整条链路。需要显式走代理时：
+
+- `--upstream-proxy http://127.0.0.1:7890`（或环境变量 `VISION_UPSTREAM_PROXY`）：通过该代理的 CONNECT 隧道访问上游。
+- `--proxy-first`（或环境变量 `VISION_PROXY_FIRST=1`）：先尝试显式代理，再走直连；默认先直连。
+
+行为约定：
+
+- 建连成功（TCP/TLS 握手完成）的路由记入内存，后续请求优先复用；进程重启后重置。
+- 仅在连接建立阶段失败（拒绝 / DNS / TLS / 5 秒 socket 超时）时切换路由；上游返回的 HTTP 4xx/5xx 原样透传、不切换。
+- 所有路由都失败时返回 502，错误消息逐条列出路由与失败原因（如 `All egress routes failed: direct -> ...; proxy http://127.0.0.1:7890 -> ...`）。
+- HTTP 代理 URL 未写端口时使用标准端口 80；暂不支持代理鉴权。
+- socket 建连超时 5 秒/候选，连接建立后读取超时保持 600 秒，流式响应开始后不中途切换。
+
+## 故障排查
+
+| 现象 | 检查 |
+|---|---|
+| `view_image is not allowed because you do not support image inputs` | 检查当前 catalog 条目是否明确为仅 `text`；若是，仅追加 `image` 后重启 Codex |
+| 视觉 API 返回 429/5xx | 查看代理错误日志；代理仅做有限重试，最终失败应明确返回错误 |
+| 端口未监听 | 检查 Python、脚本、env、上游地址、后台启动项和端口占用 |
+| 修改配置后未生效 | 完全退出并重启宿主 |
+| 上游返回鉴权错误 | 确认宿主仍发送原有鉴权头，且代理没有删除或替换该请求头 |
+| 整条链路 502，提示 `All egress routes failed` | 直连与显式代理均建连失败；检查上游地址、网络连通性与 `--upstream-proxy` 配置 |
