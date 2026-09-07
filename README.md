@@ -3,9 +3,9 @@
 > **[中文化] agent-vision-toolkit**
 >
 > 此项目是 [Anionex/agent-vision-toolkit](https://github.com/Anionex/agent-vision-toolkit) 的中文翻译版本。
-> - 原项目 Stars: 0
-> - 主语言: 
-> - 许可证: 
+> - 原项目 Stars: 1180
+> - 主语言: Python
+> - 许可证: MIT
 > - 翻译日期: 2026-09-07
 > - 原始 README: [README_en.md](README_en.md)
 >
